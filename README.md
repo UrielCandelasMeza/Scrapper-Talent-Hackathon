@@ -1,6 +1,6 @@
 # 🎯 Genius Arena — Discord Bot Scraper
 
-Monitorea nuevos proyectos del **Talent Hackathon 2026** en Genius Arena y notifica automáticamente a un canal de Discord cada 2 horas.
+Monitorea nuevos proyectos del **Talent Hackathon 2026** en Genius Arena y notifica automáticamente a un canal de Discord cada 0.5 horas.
 
 ---
 
@@ -124,7 +124,7 @@ Al iniciar verás en la terminal:
 ```
 ✅  Bot conectado como TuBot#1234
 📡  Canal objetivo: 123456789012345678
-⏱   Checando cada 2h
+⏱   Checando cada 0.5h
 ```
 
 Y el bot enviará un mensaje de confirmación al canal de Discord.
