@@ -71,6 +71,7 @@ Edita `.env`:
 ```env
 DISCORD_TOKEN=tu_token_aqui
 CHANNEL_ID=123456789012345678
+GUILD_ID=987654321098765432
 ```
 
 ### 2. Cómo obtener cada valor
@@ -86,6 +87,13 @@ CHANNEL_ID=123456789012345678
 
 1. En Discord: **Ajustes → Avanzado → Modo desarrollador** ✅
 2. Clic derecho en el canal donde quieres las notificaciones → **Copiar ID del canal**
+
+**`GUILD_ID`**
+
+1. Con el **Modo desarrollador** activo
+2. Clic derecho en el **nombre de tu server** (en la lista izquierda) → **Copiar ID del servidor**
+
+> 💡 El `GUILD_ID` permite que los slash commands (`/buscar`, `/summary`, etc.) aparezcan **de inmediato** al iniciar el bot, en lugar de esperar hasta 1 hora que tarda Discord en sincronizar comandos globales.
 
 ### 3. Invita el bot a tu servidor
 
@@ -211,6 +219,7 @@ pm2 restart genius-arena-bot # reiniciar
 ```env
 DISCORD_TOKEN=
 CHANNEL_ID=
+GUILD_ID=
 ```
 
 > ⚠️ Nunca subas tu archivo `.env` real a GitHub. Agrega `.env` a tu `.gitignore`.

@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 """
 Genius Arena Discord Bot
+=========================
+- Scraper automático cada 2 horas
+- /buscar <término>       → busca proyectos en la BD
+- /summary                → cuántos proyectos hay por categoría
+- /banco_azteca           → proyectos de Grupo Salinas Banco Azteca
+- /fundacion_coppel       → proyectos de Fundación Coppel
+- /mcdonalds              → proyectos de McDonald's
+- /salud_digna            → proyectos de Salud Digna
+- /toka                   → proyectos de Toka
+- /qualcomm               → proyectos de Qualcomm
+- /capital_one            → proyectos de Capital One
 """
 
 import sqlite3
@@ -14,9 +25,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "TU_TOKEN_AQUI")
-CHANNEL_ID    = int(os.getenv("CHANNEL_ID", "0"))   # ID numérico del canal
-CHECK_EVERY_HOURS = 0.5                             # Frecuencia de chequeo
+DISCORD_TOKEN     = os.getenv("DISCORD_TOKEN", "TU_TOKEN_AQUI")
+CHANNEL_ID        = int(os.getenv("CHANNEL_ID", "0"))
+GUILD_ID          = int(os.getenv("GUILD_ID", "0"))   # ID de tu server → sync instantáneo
+CHECK_EVERY_HOURS = 0.5
 
 URL      = "https://app2.genius-arena.com/challenge/23/talent-hackathon-2026"
 DB_FILE  = "genius_arena.db"
@@ -24,21 +36,58 @@ JSON_DIR = "runs"
 HEADLESS = True
 TIMEOUT  = 30_000
 
+# Mapeo de slash command → fragmento de categoría en la BD
+CATEGORIES = {
+    "banco_azteca":    "Grupo Salinas Banco Azteca",
+    "fundacion_coppel":"Fundación Coppel",
+    "mcdonalds":       "McDonald's",
+    "salud_digna":     "Salud Digna",
+    "toka":            "Toka",
+    "qualcomm":        "Qualcomm",
+    "capital_one":     "Capital One",
+}
 
+# Emoji por categoría
+CAT_EMOJI = {
+    "banco_azteca":     "🏦",
+    "fundacion_coppel": "⚽",
+    "mcdonalds":        "🍔",
+    "salud_digna":      "🏥",
+    "toka":             "🎮",
+    "qualcomm":         "⚡",
+    "capital_one":      "💳",
+}
+
+# Color embed por categoría
+CAT_COLOR = {
+    "banco_azteca":     0xE63329,
+    "fundacion_coppel": 0x0057A8,
+    "mcdonalds":        0xFFC72C,
+    "salud_digna":      0x00A651,
+    "toka":             0x7B2FBE,
+    "qualcomm":         0x3253DC,
+    "capital_one":      0xD03027,
+}
+
+
+# ── Validación ────────────────────────────────────────────────────────────────
 def validate_config():
-    """Revisa la configuracion"""
     errors = []
     if DISCORD_TOKEN == "TU_TOKEN_AQUI":
-        errors.append("❌  DISCORD_TOKEN no configurado.")
+        errors.append("❌  DISCORD_TOKEN no configurado en .env")
     if CHANNEL_ID == 0:
-        errors.append("❌  CHANNEL_ID no configurado.")
+        errors.append("❌  CHANNEL_ID no configurado en .env")
+    if GUILD_ID == 0:
+        errors.append("❌  GUILD_ID no configurado en .env")
     if errors:
         for e in errors:
             print(e)
-        print("\n💡  Edita las variables DISCORD_TOKEN y CHANNEL_ID en el script,")
-        print("    o usa variables de entorno:")
-        print("    DISCORD_TOKEN=xxx CHANNEL_ID=yyy python3 discord_bot.py")
         sys.exit(1)
+
+
+# ── Base de datos ─────────────────────────────────────────────────────────────
+def get_conn():
+    return sqlite3.connect(DB_FILE)
 
 
 def init_db(conn):
@@ -87,7 +136,61 @@ def log_run(conn, timestamp, total, new_count, json_file):
     conn.commit()
 
 
-# ── Scraping (Playwright) ─────────────────────────────────────────────────────
+# ── Queries de búsqueda ───────────────────────────────────────────────────────
+def db_search(term: str) -> list[dict]:
+    """Busca proyectos por término en título, equipo, descripción o miembros."""
+    like = f"%{term}%"
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT id, title, team, category, description, members, url, first_seen
+           FROM projects
+           WHERE title       LIKE ? COLLATE NOCASE
+              OR team        LIKE ? COLLATE NOCASE
+              OR description LIKE ? COLLATE NOCASE
+              OR members     LIKE ? COLLATE NOCASE
+           ORDER BY first_seen DESC""",
+        (like, like, like, like),
+    ).fetchall()
+    conn.close()
+    return [_row_to_dict(r) for r in rows]
+
+
+def db_by_category(keyword: str) -> list[dict]:
+    """Devuelve proyectos cuya categoría contiene keyword."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT id, title, team, category, description, members, url, first_seen
+           FROM projects
+           WHERE category LIKE ? COLLATE NOCASE
+           ORDER BY first_seen DESC""",
+        (f"%{keyword}%",),
+    ).fetchall()
+    conn.close()
+    return [_row_to_dict(r) for r in rows]
+
+
+def db_summary() -> list[tuple]:
+    """Retorna (categoria, count) ordenado de mayor a menor."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT category, COUNT(*) as cnt
+           FROM projects
+           GROUP BY category
+           ORDER BY cnt DESC"""
+    ).fetchall()
+    total = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+    conn.close()
+    return rows, total
+
+
+def _row_to_dict(r) -> dict:
+    return {
+        "id": r[0], "title": r[1], "team": r[2], "category": r[3],
+        "description": r[4], "members": r[5], "url": r[6], "first_seen": r[7],
+    }
+
+
+# ── Scraping ──────────────────────────────────────────────────────────────────
 EXTRACT_JS = """
 () => {
     const results = [];
@@ -134,7 +237,6 @@ PAGES_JS = """
 
 
 def scrape_sync():
-    """Scraping síncrono — se llama desde un thread separado."""
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
     def extract(page):
@@ -154,43 +256,35 @@ def scrape_sync():
             page.goto(URL, timeout=TIMEOUT)
             page.wait_for_timeout(3000)
 
-        # Clic en pestaña Proyectos
-        clicked = False
         for attempt in [
             lambda: page.locator("h6.cmaOcaP0").filter(has_text="Proyectos").first.click(),
             lambda: page.get_by_text("Proyectos", exact=True).first.click(),
         ]:
             try:
-                attempt()
-                clicked = True
-                break
+                attempt(); break
             except Exception:
                 pass
 
         try:
             page.wait_for_selector(
                 ".bubble-element.group-item.bubble-r-container.flex.column[class*='entry-']",
-                timeout=15_000
-            )
+                timeout=15_000)
         except PWTimeout:
             page.wait_for_timeout(4000)
 
-        # Scroll para lazy loading
         for _ in range(4):
             page.evaluate("window.scrollBy(0, 700)")
             page.wait_for_timeout(400)
         page.evaluate("window.scrollTo(0, 0)")
         page.wait_for_timeout(500)
 
-        # Página 1
         cards = extract(page)
         all_projects.extend(cards)
         visited.add("1")
 
-        # Resto de páginas
         while True:
-            buttons  = page.evaluate(PAGES_JS)
-            next_pg  = next((b for b in buttons if b not in visited), None)
+            buttons = page.evaluate(PAGES_JS)
+            next_pg = next((b for b in buttons if b not in visited), None)
             if not next_pg:
                 break
             try:
@@ -204,7 +298,6 @@ def scrape_sync():
 
         browser.close()
 
-    # Deduplicar
     seen_ids, deduped = set(), []
     for p in all_projects:
         if p["id"] not in seen_ids:
@@ -234,9 +327,58 @@ def save_run_json(timestamp, new_projects, seen_projects):
 # ── Discord Bot ───────────────────────────────────────────────────────────────
 try:
     import discord
+    from discord import app_commands
     from discord.ext import tasks
 except ImportError:
-    sys.exit("❌  Instala discord.py:\n    pip install discord.py")
+    sys.exit("❌  pip install discord.py")
+
+
+def _project_embed(p: dict, color: int = 0x4651E2) -> discord.Embed:
+    e = discord.Embed(title=p["title"], url=p["url"] or None, color=color)
+    if p["team"]:
+        e.add_field(name="👥 Equipo",        value=p["team"],     inline=True)
+    if p["category"]:
+        short_cat = p["category"].split(" - ")[0] if " - " in p["category"] else p["category"]
+        e.add_field(name="🏷️ Categoría",    value=short_cat,     inline=True)
+    if p["description"]:
+        desc = p["description"][:300] + ("…" if len(p["description"]) > 300 else "")
+        e.add_field(name="📝 Descripción",   value=desc,          inline=False)
+    if p["members"]:
+        e.add_field(name="🙋 Participantes", value=p["members"],  inline=False)
+    if p["url"]:
+        e.add_field(name="🔗",               value=f"[Ver equipo]({p['url']})", inline=False)
+    e.set_footer(text=f"ID: {p['id']} • Visto por primera vez: {p.get('first_seen','?')}")
+    return e
+
+
+async def send_project_list(
+    interaction: discord.Interaction,
+    projects: list[dict],
+    title: str,
+    color: int = 0x4651E2,
+    empty_msg: str = "No se encontraron proyectos.",
+):
+    """Envía hasta 10 proyectos como embeds paginados en el canal."""
+    await interaction.response.defer(ephemeral=False)
+
+    if not projects:
+        await interaction.followup.send(
+            embed=discord.Embed(title=title, description=f"😕 {empty_msg}", color=0x95A5A6)
+        )
+        return
+
+    MAX = 10
+    header = discord.Embed(
+        title=title,
+        description=f"**{len(projects)}** proyecto(s) encontrado(s)"
+                    + (f" — mostrando los primeros {MAX}." if len(projects) > MAX else "."),
+        color=color,
+    )
+    await interaction.followup.send(embed=header)
+
+    for p in projects[:MAX]:
+        await interaction.channel.send(embed=_project_embed(p, color))
+        await asyncio.sleep(0.4)
 
 
 class GeniusArenaBot(discord.Client):
@@ -244,60 +386,143 @@ class GeniusArenaBot(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
         super().__init__(intents=intents)
-        self.channel_id = CHANNEL_ID
+        self.tree = app_commands.CommandTree(self)
+
+    async def setup_hook(self):
+        """Registra todos los slash commands y sincroniza al guild de forma instantánea."""
+        self._register_commands()
+        guild = discord.Object(id=GUILD_ID)
+        # Copia los comandos globales al guild → aparecen de inmediato (sin esperar 1h)
+        self.tree.copy_global_to(guild=guild)
+        await self.tree.sync(guild=guild)
+        print(f"✅  Slash commands sincronizados al guild {GUILD_ID} (instantáneo)")
+
+    def _register_commands(self):
+
+        # ── /buscar ───────────────────────────────────────────────────────────
+        @self.tree.command(name="buscar", description="Busca proyectos en la base de datos")
+        @app_commands.describe(termino="Palabra clave: nombre, equipo, descripción o participante")
+        async def cmd_buscar(interaction: discord.Interaction, termino: str):
+            results = db_search(termino)
+            await send_project_list(
+                interaction,
+                results,
+                title=f"🔍 Búsqueda: \"{termino}\"",
+                color=0x4651E2,
+                empty_msg=f"Ningún proyecto coincide con **{termino}**.",
+            )
+
+        # ── /summary ──────────────────────────────────────────────────────────
+        @self.tree.command(name="summary", description="Cuántos proyectos hay por categoría")
+        async def cmd_summary(interaction: discord.Interaction):
+            rows, total = db_summary()
+            if total == 0:
+                await interaction.response.send_message(
+                    embed=discord.Embed(
+                        title="📊 Resumen por categoría",
+                        description="La base de datos está vacía. Espera el primer scrape.",
+                        color=0x95A5A6,
+                    )
+                )
+                return
+
+            e = discord.Embed(
+                title="📊 Resumen por categoría",
+                description=f"**{total}** proyectos registrados en total",
+                color=0x4651E2,
+                timestamp=datetime.now(),
+            )
+
+            # Asigna emoji si la categoría coincide con alguna conocida
+            for cat, count in rows:
+                emoji = "📁"
+                for key, keyword in CATEGORIES.items():
+                    if keyword.lower() in (cat or "").lower():
+                        emoji = CAT_EMOJI[key]
+                        break
+                short = cat.split(" - ")[0] if cat and " - " in cat else (cat or "Sin categoría")
+                bar   = "█" * min(count, 20)
+                e.add_field(
+                    name=f"{emoji} {short}",
+                    value=f"`{bar}` **{count}**",
+                    inline=False,
+                )
+
+            e.set_footer(text="Genius Arena Scraper")
+            await interaction.response.send_message(embed=e)
+
+        # ── Comandos por categoría (uno por empresa) ────────────────────────────
+        for cmd_name, keyword in CATEGORIES.items():
+            def make_cmd(cname, kw):
+                _emoji = CAT_EMOJI[cname]
+                _color = CAT_COLOR[cname]
+                _label = kw.split(" - ")[0] if " - " in kw else kw
+                _kw    = kw
+
+                @self.tree.command(
+                    name=cname,
+                    description=f"{_emoji} Proyectos de {_label}"
+                )
+                async def _cmd(interaction: discord.Interaction):
+                    results = db_by_category(_kw)
+                    await send_project_list(
+                        interaction,
+                        results,
+                        title=f"{_emoji} Proyectos — {_label}",
+                        color=_color,
+                        empty_msg=f"No hay proyectos de **{_label}** aún.",
+                    )
+
+            make_cmd(cmd_name, keyword)
 
     async def on_ready(self):
         print(f"✅  Bot conectado como {self.user}")
-        print(f"📡  Canal objetivo: {self.channel_id}")
-        print(f"⏱   Checando cada {CHECK_EVERY_HOURS}h\n")
-
-        ch = self.get_channel(self.channel_id)
+        print(f"📡  Canal: {CHANNEL_ID}")
+        print(f"⏱   Scrape cada {CHECK_EVERY_HOURS}h\n")
+        ch = self.get_channel(CHANNEL_ID)
         if ch:
-            await ch.send(
-                embed=self._embed_startup()
-            )
+            await ch.send(embed=self._embed_startup())
         self.check_loop.start()
 
     def _embed_startup(self):
+        cmds = "\n".join(
+            f"{CAT_EMOJI[k]} `/{k}`" for k in CATEGORIES
+        )
         e = discord.Embed(
             title="🚀 Genius Arena Scraper activo",
             description=(
-                f"Monitoreando proyectos del **Talent Hackathon 2026**\n"
-                f"Checaré cada **{CHECK_EVERY_HOURS} horas** y te avisaré aquí."
+                f"Monitoreando **Talent Hackathon 2026** · scrape cada **{CHECK_EVERY_HOURS}h**\n\n"
+                f"**Comandos disponibles:**\n"
+                f"🔍 `/buscar <término>` — búsqueda libre\n"
+                f"📊 `/summary` — resumen por categoría\n"
+                f"{cmds}"
             ),
             color=0x4651E2,
         )
-        e.add_field(name="🔗 URL", value=URL, inline=False)
         e.set_footer(text=f"Iniciado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         return e
 
     @tasks.loop(hours=CHECK_EVERY_HOURS)
     async def check_loop(self):
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{now}] 🔍 Corriendo scraper …")
-
-        ch = self.get_channel(self.channel_id)
-
-        # Scraping en thread separado para no bloquear el event loop
+        print(f"[{now}] 🔍 Scraping …")
+        ch   = self.get_channel(CHANNEL_ID)
         loop = asyncio.get_event_loop()
+
         try:
             all_projects = await loop.run_in_executor(None, scrape_sync)
         except Exception as exc:
-            print(f"  ❌ Error en scraping: {exc}")
+            print(f"  ❌ {exc}")
             if ch:
-                await ch.send(
-                    embed=discord.Embed(
-                        title="⚠️ Error en el scraper",
-                        description=f"```{exc}```",
-                        color=0xFF4444,
-                    )
-                )
+                await ch.send(embed=discord.Embed(
+                    title="⚠️ Error en el scraper",
+                    description=f"```{exc}```",
+                    color=0xFF4444,
+                ))
             return
 
-        conn = sqlite3.connect(DB_FILE)
-        init_db(conn)
+        conn = get_conn()
         prev_ids = get_seen_ids(conn)
-
         new_projects  = [p for p in all_projects if p["id"] not in prev_ids]
         seen_projects = [p for p in all_projects if p["id"] in     prev_ids]
 
@@ -306,72 +531,39 @@ class GeniusArenaBot(discord.Client):
         log_run(conn, now, len(all_projects), len(new_projects), json_file)
         conn.close()
 
-        print(f"  Total: {len(all_projects)} | Nuevos: {len(new_projects)} | Vistos: {len(seen_projects)}")
+        print(f"  Total: {len(all_projects)} | Nuevos: {len(new_projects)}")
 
-        if ch:
-            if new_projects:
-                # Un embed por cada proyecto nuevo
-                await ch.send(
-                    embed=self._embed_summary(len(new_projects), len(all_projects))
-                )
-                for p in new_projects:
-                    await ch.send(embed=self._embed_project(p))
-                    await asyncio.sleep(0.5)   # rate-limit suave
-            else:
-                await ch.send(
-                    embed=self._embed_no_new(len(all_projects), now)
-                )
+        if not ch:
+            return
+
+        if new_projects:
+            await ch.send(embed=discord.Embed(
+                title=f"🆕 {len(new_projects)} proyecto(s) nuevo(s)",
+                description=f"**{len(all_projects)}** en total · **{len(new_projects)}** nuevos",
+                color=0x2ECC71,
+                timestamp=datetime.now(),
+            ))
+            for p in new_projects:
+                await ch.send(embed=_project_embed(p))
+                await asyncio.sleep(0.5)
+        else:
+            await ch.send(embed=discord.Embed(
+                title="✅ Sin proyectos nuevos",
+                description=f"Se revisaron **{len(all_projects)}** proyectos — sin novedades.",
+                color=0x95A5A6,
+                timestamp=datetime.now(),
+            ).set_footer(text=f"Próxima revisión en {CHECK_EVERY_HOURS}h"))
 
     @check_loop.before_loop
     async def before_check(self):
         await self.wait_until_ready()
 
-    # ── Embeds ────────────────────────────────────────────────────────────────
-    def _embed_summary(self, new_count, total):
-        e = discord.Embed(
-            title=f"🆕 {new_count} proyecto{'s' if new_count > 1 else ''} nuevo{'s' if new_count > 1 else ''} detectado{'s' if new_count > 1 else ''}",
-            color=0x2ECC71,
-            timestamp=datetime.now(),
-        )
-        e.add_field(name="📊 Total en el hackathon", value=str(total), inline=True)
-        e.add_field(name="✨ Nuevos esta revisión",  value=str(new_count), inline=True)
-        e.set_footer(text="Genius Arena Scraper")
-        return e
-
-    def _embed_project(self, p):
-        e = discord.Embed(
-            title=p["title"],
-            url=p["url"] if p["url"] else discord.Embed.Empty,
-            color=0x4651E2,
-        )
-        if p["team"]:
-            e.add_field(name="👥 Equipo",     value=p["team"],     inline=True)
-        if p["category"]:
-            e.add_field(name="🏷️ Categoría", value=p["category"], inline=False)
-        if p["description"]:
-            desc = p["description"][:300] + ("…" if len(p["description"]) > 300 else "")
-            e.add_field(name="📝 Descripción", value=desc, inline=False)
-        if p["members"]:
-            e.add_field(name="🙋 Participantes", value=p["members"], inline=False)
-        if p["url"]:
-            e.add_field(name="🔗 Ver equipo", value=f"[Ver más]({p['url']})", inline=False)
-        e.set_footer(text=f"ID: {p['id']}")
-        return e
-
-    def _embed_no_new(self, total, timestamp):
-        e = discord.Embed(
-            title="✅ Sin proyectos nuevos",
-            description=f"Se revisaron **{total}** proyectos — ninguno es nuevo.",
-            color=0x95A5A6,
-            timestamp=datetime.now(),
-        )
-        e.set_footer(text="Próxima revisión en 2 horas • Genius Arena Scraper")
-        return e
-
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     validate_config()
-    init_db(sqlite3.connect(DB_FILE))   # asegura que la BD exista
+    conn = get_conn()
+    init_db(conn)
+    conn.close()
     bot = GeniusArenaBot()
     bot.run(DISCORD_TOKEN)
